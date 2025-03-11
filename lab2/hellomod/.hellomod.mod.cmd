@@ -1,0 +1,1 @@
+savedcmd_/home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/hellomod.mod := printf '%s\n'   hellomod.o | awk '!x[$$0]++ { print("/home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/"$$0) }' > /home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/hellomod.mod

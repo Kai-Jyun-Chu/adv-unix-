@@ -1,0 +1,1 @@
+savedcmd_/home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/Module.symvers :=  scripts/mod/modpost -M        -o /home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/Module.symvers -T /home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/modules.order -i Module.symvers -e 

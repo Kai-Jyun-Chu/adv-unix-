@@ -1,0 +1,1 @@
+savedcmd_/home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/modules.order := {   echo /home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/hellomod.o; :; } > /home/kenbertchu/adv-unix/up-runtime/home/kenbertchu/lab2/hellomod/modules.order
