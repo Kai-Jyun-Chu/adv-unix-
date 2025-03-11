@@ -34,16 +34,30 @@ static bool setup_done = false; // Tracks if CM_IOC_SETUP was called
 static size_t buffer_size = 0;  // Tracks buffer usage
 static unsigned long total_read = 0, total_written = 0;
 static unsigned long byte_freq[256] = {0}; // Byte frequency tracking
-static char buffer[1040];  // Data buffer
-
+static char *buffer = NULL;  // Data buffer
+static size_t cap = 1024;
 
 static int cryptomod_dev_open(struct inode *i, struct file *f) {
 	printk(KERN_INFO "cryptomod: device opened.\n");
+	if (!buffer) {  
+        
+        buffer = kmalloc(cap, GFP_KERNEL);
+        if (!buffer) {
+            printk(KERN_ERR "Failed to allocate buffer.\n");
+            return -ENOMEM;
+        }
+        memset(buffer, 0, cap);  // Zero initialize
+    }
 	return 0;
 }
 
 static int cryptomod_dev_close(struct inode *i, struct file *f) {
 	printk(KERN_INFO "cryptomod: device closed.\n");
+	if (buffer) {
+        kfree(buffer);
+        buffer = NULL;
+        
+    }
 	return 0;
 }
 
@@ -57,6 +71,8 @@ static ssize_t cryptomod_dev_read(struct file *f, char __user *buf, size_t len, 
         return -EINVAL;
 
     // 2) If no data in the buffer
+	if (!buffer)
+		return -ENOMEM;
     if (buffer_size == 0) {
         // 2a) If not finalized, no data is ready, return -EAGAIN
         if (!finalized)
@@ -69,8 +85,13 @@ static ssize_t cryptomod_dev_read(struct file *f, char __user *buf, size_t len, 
     to_copy = (len > buffer_size) ? buffer_size : len;
 
     // 4) Copy data to user space
-    if (copy_to_user(buf, buffer, to_copy))
-        return -EBUSY;  // Return -EBUSY on copy failure
+    if (copy_to_user(buf, buffer, to_copy)){
+		return -EBUSY;
+	}
+          
+	for (int i = 0; i < to_copy; i++) {
+        byte_freq[(unsigned char)buffer[i]]++;
+    }	
     if (to_copy < buffer_size) {
         memmove(buffer, buffer + to_copy, buffer_size - to_copy);
     }
@@ -79,23 +100,25 @@ static ssize_t cryptomod_dev_read(struct file *f, char __user *buf, size_t len, 
 	printk(KERN_INFO "buffer_size: %zu.\n", buffer_size);
 
     total_read += to_copy;
-
+	
     return to_copy;  
 }
 
 static ssize_t cryptomod_dev_write(struct file *f, const char __user *buf, size_t len, loff_t *off) {
 	
     size_t space_left, bytes_to_copy;
-    int i;
+
 	if(finalized){
 		return -EINVAL;
 	}
     
     
-    
-    if (buffer_size >= sizeof(buffer))
+    if (!buffer)
+    	return -ENOMEM;
+    if (buffer_size >= cap)
         return -EAGAIN;  
-    space_left = sizeof(buffer) - buffer_size;
+
+    space_left = cap - buffer_size;
     bytes_to_copy = (len > space_left) ? space_left : len;
 
     
@@ -106,9 +129,7 @@ static ssize_t cryptomod_dev_write(struct file *f, const char __user *buf, size_
     buffer_size += bytes_to_copy;
 	total_written += bytes_to_copy;
     // Update the byte frequency counters for the newly copied data
-    for (i = 0; i < bytes_to_copy; i++) {
-        byte_freq[(unsigned char)buffer[buffer_size - bytes_to_copy + i]]++;
-    }
+    
 	
     return bytes_to_copy;  // Return the number of bytes successfully written
 }
@@ -163,7 +184,7 @@ static long cryptomod_dev_ioctl(struct file *fp, unsigned int cmd, unsigned long
 			if (crypto_config.c_mode == ENC) {
 				
 				size_t padding = CM_BLOCK_SIZE - (buffer_size % CM_BLOCK_SIZE);
-				if (buffer_size + padding > sizeof(buffer))
+				if (buffer_size + padding > cap)
 					return -EINVAL;  // Buffer overflow
 		
 				for (size_t i = 0; i < padding; i++){
@@ -194,14 +215,14 @@ static long cryptomod_dev_ioctl(struct file *fp, unsigned int cmd, unsigned long
 					goto out_free_tfm;
 				}
 				printk(KERN_INFO "✅✅ready to Encrypt %zu bytes.\n", buffer_size);
-				u8 *encrypt_buf = (u8 *)buffer;
-				sg_init_one(&sg, encrypt_buf, buffer_size);
+				//u8 *encrypt_buf = (u8 *)buffer;
+				sg_init_one(&sg, buffer, buffer_size);
 				skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |
                                        CRYPTO_TFM_REQ_MAY_SLEEP,
                                   crypto_req_done, &wait);
 				skcipher_request_set_crypt(req, &sg, &sg, buffer_size, NULL);
 					
-				//err = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
+				err = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
 				if (err) {
 					printk(KERN_ERR "cryptomod: AES encryption failed: %d\n", err);
 					goto out_free_req;
@@ -228,8 +249,7 @@ static long cryptomod_dev_ioctl(struct file *fp, unsigned int cmd, unsigned long
 			buffer_size = 0;
 			finalized = false;
 
-			// 🔹 Zero-init the entire buffer for debugging
-			memset(buffer, 0, sizeof(buffer));
+			
 
 			printk(KERN_INFO "cryptomod: Cleanup completed (buffer zeroed).\n");
 			return 0;
