@@ -23,449 +23,435 @@
 #include <linux/mutex.h>
 #include <linux/crypto.h>
 
-DEFINE_MUTEX(buffer_lock);
+DEFINE_MUTEX(glob_lock);
 static dev_t devnum;
 static struct cdev c_dev;
 static struct class *clazz;
 
-static struct CryptoSetup crypto_config;
-static bool finalized = false;  // Tracks if CM_IOC_FINALIZE was called
-static bool setup_done = false; // Tracks if CM_IOC_SETUP was called
-static size_t buffer_size = 0;  // Tracks buffer usage
-static size_t out_size=0;
-static unsigned long total_read = 0, total_written = 0;
-static unsigned long byte_freq[256] = {0}; // Byte frequency tracking
-static char *buffer = NULL;  // Data buffer
-static char *buffer_o = NULL;
-//static char *buffer_out = NULL;
-static size_t cap = 4096;
-//static size_t count_byte =0;
+struct cryptomod_priv {
 
-int AES(char *buffer, size_t* buffer_size,  struct CryptoSetup crypto_config){
+    //struct mutex lock;
+
+    bool setup_done;
+    bool finalized;
+
+    char *buffer;
+    char *buffer_o;
+    size_t buffer_size;
+    size_t out_size;
+    struct CryptoSetup crypto_config;
+};
+static unsigned long total_read;
+static unsigned long total_written;
+static unsigned long byte_freq[256];
+
+static size_t cap = 4096;
+
+
+int AES(char *buffer, size_t* buffer_size,  struct CryptoSetup *crypto_config, bool finalized){
 	struct crypto_skcipher *tfm = NULL;
 	struct skcipher_request *req = NULL;
 	struct scatterlist sg;
 	DECLARE_CRYPTO_WAIT(wait);
 	int err;
 
-	if (crypto_config.c_mode == ENC) {
+	if (crypto_config->c_mode == ENC) {
 				
-				tfm = crypto_alloc_skcipher("ecb(aes)", 0, 0);
-				if (IS_ERR(tfm)) {
-					printk(KERN_ERR "cryptomod: Error allocating AES-ECB handle: %ld\n", PTR_ERR(tfm));
-					return PTR_ERR(tfm);
-				}
-		
-				err = crypto_skcipher_setkey(tfm, crypto_config.key, crypto_config.key_len);
-				if (err) {
-					printk(KERN_ERR "cryptomod: Error setting AES key: %d\n", err);
-					goto out_free_tfm;
-				}
-		
-				req = skcipher_request_alloc(tfm, GFP_KERNEL);
-				if (!req) {
-					err = -ENOMEM;
-					goto out_free_tfm;
-				}
-				//printk(KERN_INFO "✅ready to Encrypt %zu bytes.\n", *buffer_size);
-				//u8 *encrypt_buf = (u8 *)buffer;
-				sg_init_one(&sg, buffer, *buffer_size);
-				skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |
-                                       CRYPTO_TFM_REQ_MAY_SLEEP,
-                                  crypto_req_done, &wait);
-				skcipher_request_set_crypt(req, &sg, &sg, *buffer_size, NULL);
-					
-				err = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
-				if (err) {
-					printk(KERN_ERR "cryptomod: AES encryption failed: %d\n", err);
-					goto out_free_req;
-				}
-				//printk(KERN_INFO "cryptomod: Successfully encrypted %zu bytes.\n", *buffer_size);
-			}else if(crypto_config.c_mode == DEC){
-				
-				tfm = crypto_alloc_skcipher("ecb(aes)", 0, 0);
-				if (IS_ERR(tfm)) {
-					printk(KERN_ERR "cryptomod: Error allocating AES-ECB handle: %ld\n", PTR_ERR(tfm));
-					return PTR_ERR(tfm);
-				}
-		
-				err = crypto_skcipher_setkey(tfm, crypto_config.key, crypto_config.key_len);
-				if (err) {
-					printk(KERN_ERR "cryptomod: Error setting AES key: %d\n", err);
-					goto out_free_tfm;
-				}
-		
-				req = skcipher_request_alloc(tfm, GFP_KERNEL);
-				if (!req) {
-					err = -ENOMEM;
-					goto out_free_tfm;
-				}
-				printk(KERN_INFO "✅ready to Decrypt %zu bytes.\n", *buffer_size);
-				//u8 *encrypt_buf = (u8 *)buffer;
-				sg_init_one(&sg, buffer, *buffer_size);
-				skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |
-                                       CRYPTO_TFM_REQ_MAY_SLEEP,
-                                  crypto_req_done, &wait);
-				skcipher_request_set_crypt(req, &sg, &sg, *buffer_size, NULL);
-					
-				err = crypto_wait_req(crypto_skcipher_decrypt(req), &wait);
-				if (err) {
-					printk(KERN_ERR "cryptomod: AES decryption failed: %d\n", err);
-					goto out_free_req;
-				}
-				printk(KERN_INFO "cryptomod: Successfully decrypted %zu bytes.\n", *buffer_size);
+		tfm = crypto_alloc_skcipher("ecb(aes)", 0, 0);
+		if (IS_ERR(tfm)) {
+			printk(KERN_ERR "cryptomod: Error allocating AES-ECB handle: %ld\n", PTR_ERR(tfm));
+			return PTR_ERR(tfm);
+		}
 
-				if(finalized){
-					u8 padding_len = buffer[*buffer_size - 1];
-					// Validate padding length
-					if (padding_len < 1 || padding_len > CM_BLOCK_SIZE) {
-						printk(KERN_ERR "cryptomod: Invalid padding length: %u\n", padding_len);
-						return -EINVAL;
-					}
-					// Validate padding bytes
-					for (size_t i = 0; i < padding_len; i++) {
-						if (buffer[*buffer_size - 1 - i] != padding_len) {
-							printk(KERN_ERR "cryptomod: Padding validation failed at byte %zu\n", *buffer_size - 1 - i);
-							return -EINVAL;
-						}
-					}
-					// Remove padding
-					*buffer_size -= padding_len;
-					printk(KERN_INFO "cryptomod: Successfully removed padding, new size: %zu\n", *buffer_size);
-					
-				}
-				
+		err = crypto_skcipher_setkey(tfm, crypto_config->key, crypto_config->key_len);
+		if (err) {
+			printk(KERN_ERR "cryptomod: Error setting AES key: %d\n", err);
+			goto out_free_tfm;
+		}
+
+		req = skcipher_request_alloc(tfm, GFP_KERNEL);
+		if (!req) {
+			err = -ENOMEM;
+			goto out_free_tfm;
+		}
+		//printk(KERN_INFO "✅ready to Encrypt %zu bytes.\n", *buffer_size);
+		//u8 *encrypt_buf = (u8 *)buffer;
+		sg_init_one(&sg, buffer, *buffer_size);
+		skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |
+								CRYPTO_TFM_REQ_MAY_SLEEP,
+							crypto_req_done, &wait);
+		skcipher_request_set_crypt(req, &sg, &sg, *buffer_size, NULL);
+			
+		err = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
+		if (err) {
+			printk(KERN_ERR "cryptomod: AES encryption failed: %d\n", err);
+			goto out_free_req;
+		}
+		//printk(KERN_INFO "cryptomod: Successfully encrypted %zu bytes.\n", *buffer_size);
+	}else if(crypto_config->c_mode == DEC){
+		
+		tfm = crypto_alloc_skcipher("ecb(aes)", 0, 0);
+		if (IS_ERR(tfm)) {
+			printk(KERN_ERR "cryptomod: Error allocating AES-ECB handle: %ld\n", PTR_ERR(tfm));
+			return PTR_ERR(tfm);
+		}
+
+		err = crypto_skcipher_setkey(tfm, crypto_config->key, crypto_config->key_len);
+		if (err) {
+			printk(KERN_ERR "cryptomod: Error setting AES key: %d\n", err);
+			goto out_free_tfm;
+		}
+
+		req = skcipher_request_alloc(tfm, GFP_KERNEL);
+		if (!req) {
+			err = -ENOMEM;
+			goto out_free_tfm;
+		}
+		//printk(KERN_INFO "✅ready to Decrypt %zu bytes.\n", *buffer_size);
+		//u8 *encrypt_buf = (u8 *)buffer;
+		sg_init_one(&sg, buffer, *buffer_size);
+		skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |
+								CRYPTO_TFM_REQ_MAY_SLEEP,
+							crypto_req_done, &wait);
+		skcipher_request_set_crypt(req, &sg, &sg, *buffer_size, NULL);
+			
+		err = crypto_wait_req(crypto_skcipher_decrypt(req), &wait);
+		if (err) {
+			printk(KERN_ERR "cryptomod: AES decryption failed: %d\n", err);
+			return -EINVAL;
+			goto out_free_req;
+		}
+		//printk(KERN_INFO "cryptomod: Successfully decrypted %zu bytes.\n", *buffer_size);
+
+		if(finalized){
+			u8 padding_len = buffer[*buffer_size - 1];
+			// Validate padding length
+			if (padding_len < 1 || padding_len > CM_BLOCK_SIZE) {
+				printk(KERN_ERR "cryptomod: Invalid padding length: %u\n", padding_len);
+				return -EINVAL;
 			}
+			// Validate padding bytes
+			for (size_t i = 0; i < padding_len; i++) {
+				if (buffer[*buffer_size - 1 - i] != padding_len) {
+					printk(KERN_ERR "cryptomod: Padding validation failed at byte %zu\n", *buffer_size - 1 - i);
+					return -EINVAL;
+				}
+			}
+			// Remove padding
+			*buffer_size -= padding_len;
+			printk(KERN_INFO "cryptomod: Successfully removed padding, new size: %zu\n", *buffer_size);
 			
-			
-			out_free_req:
-				skcipher_request_free(req);
-			out_free_tfm:
-				crypto_free_skcipher(tfm);
-			return err;
+		}
+		
+	}
+	
+	
+	out_free_req:
+		skcipher_request_free(req);
+	out_free_tfm:
+		crypto_free_skcipher(tfm);
+	return err;
 }
 
 static int cryptomod_dev_open(struct inode *i, struct file *f) {
-	printk(KERN_INFO "cryptomod: device opened.\n");
-	setup_done = false;
-	if (!buffer) {  
-        
-        buffer = kmalloc(cap, GFP_KERNEL);
-		
-        if (!buffer) {
-            printk(KERN_ERR "Failed to allocate buffer.\n");
-            return -ENOMEM;
-        }
-        memset(buffer, 0, cap);  // Zero initialize
+	//printk(KERN_INFO "cryptomod: device opened.\n");
+	struct cryptomod_priv *priv;
+
+    priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+    if (!priv)
+        return -ENOMEM;
+
+    /* Initialize mutex for this instance */
+    mutex_init(&glob_lock);
+
+    /* Optionally, set up any defaults here */
+    priv->setup_done = false;
+    priv->finalized  = false;
+    priv->buffer     = kzalloc(cap, GFP_KERNEL);
+    priv->buffer_o   = kzalloc(cap, GFP_KERNEL);
+    if (!priv->buffer || !priv->buffer_o) {
+        kfree(priv->buffer);
+        kfree(priv->buffer_o);
+        kfree(priv);
+        pr_err("cryptomod: Failed to allocate buffers.\n");
+        return -ENOMEM;
     }
-	if (!buffer_o) {  
-        
-        buffer_o = kmalloc(cap, GFP_KERNEL);
-		
-        if (!buffer_o) {
-            printk(KERN_ERR "Failed to allocate buffer_o.\n");
-            return -ENOMEM;
-        }
-        
-    }
-	
-	return 0;
+
+    /* Save pointer in file->private_data */
+    f->private_data = priv;
+
+    pr_info("cryptomod: device opened.\n");
+    return 0;
 }
 
 static int cryptomod_dev_close(struct inode *i, struct file *f) {
-	printk(KERN_INFO "cryptomod: device closed.\n");
-	if (buffer) {
-        kfree(buffer);
-        buffer = NULL;   
-    }
-	if (buffer_o) {
-        kfree(buffer_o);
-        buffer_o = NULL;   
+	//printk(KERN_INFO "cryptomod: device closed.\n");
+	struct cryptomod_priv *priv = f->private_data;
+
+    if (priv) {
+        mutex_lock(&glob_lock);
+        kfree(priv->buffer);
+        kfree(priv->buffer_o);
+        mutex_unlock(&glob_lock);
+
+        kfree(priv); /* final free */
+        f->private_data = NULL;
     }
 
-	return 0;
+    pr_info("cryptomod: device closed.\n");
+    return 0;
 }
 
 static ssize_t cryptomod_dev_read(struct file *f, char __user *buf, size_t len, loff_t *off)
 {
-    printk(KERN_INFO "✅cryptomod: Check bufout:%zu, request:%zu \n", out_size, len);
+    struct cryptomod_priv *priv = f->private_data;
+    ssize_t to_copy;
 
-    // 1) Ensure the device is set up
-    if (!setup_done)
+    mutex_lock(&glob_lock);
+
+    //pr_info("cryptomod: read request %zu bytes, out_size=%zu\n", len, priv->out_size);
+
+    if (!priv->setup_done) {
+        mutex_unlock(&glob_lock);
         return -EINVAL;
+    }
 
-    // 2) If no output data is available, either return -EAGAIN or 0 if finalized
-    if (out_size == 0) {
-        if (!finalized)
+    if (priv->out_size == 0) {
+        if (!priv->finalized) {
+            mutex_unlock(&glob_lock);
             return -EAGAIN;
+        }
+        mutex_unlock(&glob_lock);
         return 0;
     }
 
-    // 3) Read only the available data or the requested size, whichever is smaller
-    size_t to_copy = (len < out_size) ? len : out_size;
+    /* Read up to the smaller of user request or out_size */
+    to_copy = min(len, priv->out_size);
+    if (copy_to_user(buf, priv->buffer_o, to_copy)) {
+        mutex_unlock(&glob_lock);
+        return -EFAULT;
+    }
 
-    if (copy_to_user(buf, buffer_o, to_copy))
-        return -EBUSY;
-
-    // 4) Update byte frequency if in encryption mode
-    if (crypto_config.c_mode == ENC) {
+    if (priv->crypto_config.c_mode == ENC) {
         for (size_t i = 0; i < to_copy; i++) {
-            byte_freq[(unsigned char)buffer_o[i]]++;
+            byte_freq[(unsigned char)priv->buffer_o[i]]++;
         }
     }
 
-    // 5) Shift the remaining data in buffer_o
-    if (to_copy < out_size) {
-        memmove(buffer_o, buffer_o + to_copy, out_size - to_copy);
+    /* Shift remaining data in buffer_o */
+    if (to_copy < priv->out_size) {
+        memmove(priv->buffer_o, priv->buffer_o + to_copy, priv->out_size - to_copy);
     }
-
-    // 6) Update out_size and total_read
-    out_size -= to_copy;
+    priv->out_size -= to_copy;
     total_read += to_copy;
 
-    printk(KERN_INFO "cryptomod: read %zu bytes, remaining out_size: %zu\n", to_copy, out_size);
+    //pr_info("cryptomod: read %zu bytes, out_size now %zu\n", to_copy, priv->out_size);
+    mutex_unlock(&glob_lock);
     return to_copy;
 }
 
-static ssize_t cryptomod_dev_write(struct file *f, const char __user *buf, size_t len, loff_t *off) {
-	
-    //size_t space_left, bytes_to_copy;
-
-	if(finalized){
+static ssize_t cryptomod_dev_write(struct file *f, const char __user *buf, size_t len, loff_t *off)
+{
+	struct cryptomod_priv *priv = f->private_data;
+	mutex_lock(&glob_lock);
+    if(priv->finalized){
+		mutex_unlock(&glob_lock);
 		return -EINVAL;
 	}
-	printk(KERN_INFO "cryptomod: write %zu bytes @ %llu.\n", len, *off);
-	printk(KERN_INFO "✅cryptomod: Check bufout:%zu, buf:%zu.\n",out_size, buffer_size);
-	if (copy_from_user(buffer + buffer_size, buf , len))
+	//printk(KERN_INFO "cryptomod: write %zu bytes @ %llu.\n", len, *off);
+	//printk(KERN_INFO "✅cryptomod: Check bufout:%zu, buf:%zu.\n",priv->out_size, priv->buffer_size);
+	if (copy_from_user(priv->buffer + priv->buffer_size, buf , len)){
+		mutex_unlock(&glob_lock);
 		return -EBUSY;
-	buffer_size += len;
+	}
+
+		
+	priv->buffer_size += len;
 	size_t process_chunk;
-	while(buffer_size>CM_BLOCK_SIZE){
+	while(priv->buffer_size>CM_BLOCK_SIZE){
 		process_chunk =0;
 		size_t left_chunk =0;
-		if(crypto_config.c_mode == ENC){
-			process_chunk = buffer_size - (buffer_size%CM_BLOCK_SIZE);
+		if(priv->crypto_config.c_mode == ENC){
+			process_chunk = priv->buffer_size - (priv->buffer_size%CM_BLOCK_SIZE);
 
-			AES(buffer,&process_chunk, crypto_config);  
-			memcpy(buffer_o + out_size, buffer, process_chunk);
-			memmove(buffer, buffer + process_chunk, (buffer_size%CM_BLOCK_SIZE));
-			out_size+=process_chunk;
+			AES(priv->buffer,&process_chunk, &priv->crypto_config, false);  
+			memcpy(priv->buffer_o + priv->out_size, priv->buffer, process_chunk);
+			memmove(priv->buffer, priv->buffer + process_chunk, (priv->buffer_size%CM_BLOCK_SIZE));
+			priv->out_size+=process_chunk;
 			//total_written += process_chunk;
-			buffer_size -= process_chunk;
+			priv->buffer_size -= process_chunk;
 			
 		}else{
 			
-			if(buffer_size%CM_BLOCK_SIZE){
-				left_chunk = (buffer_size%CM_BLOCK_SIZE);
+			if(priv->buffer_size%CM_BLOCK_SIZE){
+				left_chunk = (priv->buffer_size%CM_BLOCK_SIZE);
 			}else{
 				left_chunk = CM_BLOCK_SIZE;
 			}
-			process_chunk = buffer_size - left_chunk;
-			AES(buffer,&process_chunk, crypto_config);  
-			memcpy(buffer_o + out_size, buffer, process_chunk);
-			memmove(buffer, buffer + process_chunk, left_chunk);
-			out_size+=process_chunk;
 			
-			buffer_size -= process_chunk; 
+			process_chunk = priv->buffer_size - left_chunk;
+			if(process_chunk % CM_BLOCK_SIZE){
+				mutex_unlock(&glob_lock);
+				return -EINVAL;
+			}
+			int err = AES(priv->buffer,&process_chunk, &priv->crypto_config, false); 
+			if(err){
+				mutex_unlock(&glob_lock);
+				return -EINVAL;
+			} 
+			memcpy(priv->buffer_o + priv->out_size, priv->buffer, process_chunk);
+			memmove(priv->buffer, priv->buffer + process_chunk, left_chunk);
+			priv->out_size+=process_chunk;
+			
+			priv->buffer_size -= process_chunk; 
 			//total_written += process_chunk;
 		}
 	}
 	total_written+=len;
+	mutex_unlock(&glob_lock);
 	return len;
-
-    /*
-    if(crypto_config.io_mode == ADV){
-		size_t remaining = len;
-		printk(KERN_INFO "cryptomod: write %zu bytes @ %llu.\n", len, *off);
-		
-        while (remaining > 0) {
-			
-			size_t chunk_size;
-			//printk(KERN_INFO "✅cryptomod: Check bufout:%zu, buf:%zu.\n",out_size, buffer_size);
-			if(crypto_config.c_mode == DEC ){
-				chunk_size = min(remaining, 2*(size_t)CM_BLOCK_SIZE - buffer_size);
-			}else{
-				chunk_size = min(remaining, (size_t)CM_BLOCK_SIZE - buffer_size);
-			}
-            
-			printk(KERN_INFO "chunk size: %zu, buffer_size %zu.\n", chunk_size, buffer_size);
-            if (copy_from_user(buffer + buffer_size, buf + (len - remaining), chunk_size))
-                return -EBUSY;
-
-            buffer_size += chunk_size;
-            remaining -= chunk_size;
-			//count_byte+=chunk_size;
-			//printk(KERN_INFO "remaining: %zu, deal  %zu bytes.\n", remaining, count_byte);
-            // Encrypt full blocks immediately 
-            if ( buffer_size == CM_BLOCK_SIZE&& crypto_config.c_mode == ENC) {
-				
-                AES(buffer,&buffer_size, crypto_config);  
-				memcpy(buffer_o + out_size, buffer, CM_BLOCK_SIZE);
-				out_size+=CM_BLOCK_SIZE;
-				
-                buffer_size = 0;   
-            }
-			size_t block =CM_BLOCK_SIZE;
-			if ( buffer_size > CM_BLOCK_SIZE && crypto_config.c_mode == DEC) {
-				
-                AES(buffer,&block, crypto_config);  
-				memcpy(buffer_o + out_size, buffer, CM_BLOCK_SIZE);
-				memmove(buffer, buffer + CM_BLOCK_SIZE, buffer_size - CM_BLOCK_SIZE);
-				out_size+=CM_BLOCK_SIZE;
-				
-                buffer_size -= CM_BLOCK_SIZE;   
-            }
-
-			//printk(KERN_INFO "✅cryptomod: Check bufout:%zu, buf:%zu.\n",out_size, buffer_size);
-        }
-		total_written += len;
-		return len;
-	}
-	else{
-		if (!buffer)
-			return -ENOMEM;
-		if (buffer_size >= cap)
-			return -EAGAIN;  
-
-		space_left = cap - buffer_size;
-		bytes_to_copy = (len > space_left) ? space_left : len;
-
-		
-		if (copy_from_user(buffer + buffer_size, buf, bytes_to_copy))
-			return -EBUSY;  
-
-		printk(KERN_INFO "cryptomod: write %zu bytes @ %llu.\n", bytes_to_copy, *off);
-		buffer_size += bytes_to_copy;
-		total_written += bytes_to_copy;
-		// Update the byte frequency counters for the newly copied data
-		
-		
-		return bytes_to_copy;  // Return the number of bytes successfully written
-	}*/
-    
 }
 
-
-static long cryptomod_dev_ioctl(struct file *fp, unsigned int cmd, unsigned long arg) {
-	printk(KERN_INFO "cryptomod: ioctl cmd=%u arg=%lu.\n", cmd, arg);
-	
-	//memset(byte_freq, 0, sizeof(byte_freq)); 
-	//buffer_size = 0;  // Clear buffer
-	//encrypted = false;  // Reset encryption flag
-	
-	switch (cmd) {
-
-        case CM_IOC_SETUP: {
-			
-            if (arg == 0)
-                return -EINVAL;  
-
-            if (copy_from_user(&crypto_config, (struct CryptoSetup __user *)arg, sizeof(struct CryptoSetup)))
-                return -EBUSY;  // Failed to copy data
-
+static long cryptomod_dev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
+{
+    struct cryptomod_priv *priv = f->private_data;
+    mutex_lock(&glob_lock);
+    pr_info("cryptomod: ioctl cmd=%u arg=%lu\n", cmd, arg);
+    switch (cmd) {
+    case CM_IOC_SETUP: {
+        if (arg == 0) {
+            mutex_unlock(&glob_lock);
+			return -EINVAL;
             
-			if (crypto_config.c_mode != ENC && crypto_config.c_mode != DEC)
-				return -EINVAL;  
-		
-			
-			if (crypto_config.io_mode != BASIC && crypto_config.io_mode != ADV)
-				return -EINVAL;  	
-            if (crypto_config.key_len != 16 && crypto_config.key_len != 24 && crypto_config.key_len != 32)
-                return -EINVAL;  
-
-            // Reset buffers and state
-            setup_done = true;
-            finalized = false;
-            buffer_size = 0;
-            //memset(byte_freq, 0, sizeof(byte_freq));
-
-            printk(KERN_INFO "cryptomod: Setup complete - Mode: %s, Key Length: %d, I/O Mode: %s\n",
-                   crypto_config.c_mode == ENC ? "Encrypt" : "Decrypt",
-                   crypto_config.key_len,
-                   crypto_config.io_mode == BASIC ? "Basic" : "Advanced");
-            return 0;
         }
-		////////////////////////////////////////////////////////////////////
-		///																////
-		///																////
-		////////////////////////////////////////////////////////////////////
-        case CM_IOC_FINALIZE: {
-			//printk(KERN_INFO "Arrive finale✅✅✅✅cryptomod: Check bufout:%zu, buf:%zu.\n",out_size, buffer_size);
-			if (!setup_done)
-				return -EINVAL;  
-			int err;
-			finalized = true;
-			if (crypto_config.c_mode == ENC) {
-				// Compute padding size (PKCS#7)
-				size_t padding = (buffer_size % CM_BLOCK_SIZE == 0) ? CM_BLOCK_SIZE 
-																	: (CM_BLOCK_SIZE - (buffer_size % CM_BLOCK_SIZE));
-		
-				if (buffer_size + padding > cap)
-					return -EINVAL;  
-		
-				// Apply padding directly in buffer
-				memset(buffer + buffer_size, padding, padding);
-				buffer_size += padding;
-		
-				// Ensure buffer_o has enough space
-				if (out_size + buffer_size > cap)
-					return -EINVAL;  
-		
-				// Copy buffer content into buffer_o for final encryption
-				memcpy(buffer_o + out_size, buffer, buffer_size);
-		
-				// Encrypt buffer_o in place
-				err = AES(buffer_o + out_size, &buffer_size, crypto_config);
-		
-				// Update output size
-				out_size += buffer_size;
-		
-			}else{////////////DEC
-				printk(KERN_INFO "Finalize Dec Check, b_out: %zu, buf:%zu.\n",out_size, buffer_size);
-				err = AES(buffer, &buffer_size, crypto_config);
-				memcpy(buffer_o + out_size, buffer, buffer_size);
-				out_size+=buffer_size;
-				
-                buffer_size = 0;   
-			}
-			//AES
-			
-			
-			
-			return err;
+        if (copy_from_user(&priv->crypto_config, 
+                           (struct CryptoSetup __user *)arg, 
+                           sizeof(struct CryptoSetup)))
+        {
+            mutex_unlock(&glob_lock);
+			return -EFAULT;
+            
+        }
+        if (priv->crypto_config.c_mode != ENC && priv->crypto_config.c_mode != DEC) {
+            mutex_unlock(&glob_lock);
+			return -EINVAL;
+            
+        }
+        if (priv->crypto_config.io_mode != BASIC && priv->crypto_config.io_mode != ADV) {
+            mutex_unlock(&glob_lock);
+			return -EINVAL;
+            
+        }
+        if (priv->crypto_config.key_len != 16 && 
+            priv->crypto_config.key_len != 24 && 
+            priv->crypto_config.key_len != 32)
+        {
+			mutex_unlock(&glob_lock);
+            return -EINVAL;
+            
+        }
+
+        /* Reset state for new setup */
+        priv->setup_done = true;
+        priv->finalized  = false;
+        priv->buffer_size = 0;
+        priv->out_size = 0;
+        //memset(byte_freq, 0, sizeof(byte_freq));
+
+        pr_info("cryptomod: Setup complete - Mode: %s, Key Len: %d, I/O Mode: %s\n",
+                (priv->crypto_config.c_mode == ENC) ? "Encrypt" : "Decrypt",
+                priv->crypto_config.key_len,
+                (priv->crypto_config.io_mode == BASIC) ? "Basic" : "Advanced");
+		mutex_unlock(&glob_lock);
+        return 0;
+    }
+    case CM_IOC_FINALIZE: {
+		//printk(KERN_INFO "Arrive finale✅✅✅✅cryptomod: Check bufout:%zu, buf:%zu.\n",out_size, buffer_size);
+		if (!priv->setup_done){
+			mutex_unlock(&glob_lock);
+			return -EINVAL; 
 		}
-		
-
-        case CM_IOC_CLEANUP:
-			total_read = 0;
-			total_written = 0;
-			if (!setup_done)
-				return -EINVAL;  // Device not set up
-
-			// Reset all buffers
-			buffer_size = 0;
-			out_size =0;
-			finalized = false;
-
+			 
+		int err;
+		priv->finalized = true;
+		if (priv->crypto_config.c_mode == ENC) {
+			// Compute padding size (PKCS#7)
+			size_t padding = (priv->buffer_size % CM_BLOCK_SIZE == 0) ? CM_BLOCK_SIZE 
+																: (CM_BLOCK_SIZE - (priv->buffer_size % CM_BLOCK_SIZE));
+	
+			if (priv->buffer_size + padding > cap){
+				mutex_unlock(&glob_lock);
+				return -EINVAL;  
+			}	
+			// Apply padding directly in buffer
+			memset(priv->buffer + priv->buffer_size, padding, padding);
+			priv->buffer_size += padding;
+			// Ensure buffer_o has enough space
+			if (priv->out_size + priv->buffer_size > cap){
+				mutex_unlock(&glob_lock);
+				return -EINVAL;
+			}  
+			// Copy buffer content into buffer_o for final encryption
+			memcpy(priv->buffer_o + priv->out_size, priv->buffer, priv->buffer_size);
+	
+			// Encrypt buffer_o in place
+			err = AES(priv->buffer_o + priv->out_size, &priv->buffer_size, &priv->crypto_config,true);
+			// Update output size
+			priv->out_size += priv->buffer_size;
+	
+		}else{////////////DEC
+			printk(KERN_INFO "Finalize Dec Check, b_out: %zu, buf:%zu.\n",priv->out_size, priv->buffer_size);
+			err = AES(priv->buffer, &priv->buffer_size, &priv->crypto_config, true);
+			if(err){
+				printk(KERN_INFO "==============There is an error.================\n");
+				//err = -EINVAL;
+				mutex_unlock(&glob_lock);
+				return -EINVAL;
+			}
+			memcpy(priv->buffer_o + priv->out_size, priv->buffer, priv->buffer_size);
+			priv->out_size+=priv->buffer_size;
 			
+			priv->buffer_size = 0;   
+		}
+		//AES
+		mutex_unlock(&glob_lock);
+		return err;
+	}
+    case CM_IOC_CLEANUP: {
+        if (!priv->setup_done) {
+			mutex_unlock(&glob_lock);
+            return -EINVAL;
+        }
+        /* Reset everything */
+        priv->buffer_size = 0;
+        priv->out_size = 0;
+        priv->finalized  = false;
+        memset(priv->buffer, 0, cap);
+        memset(priv->buffer_o, 0, cap);
+        //memset(byte_freq, 0, sizeof(byte_freq));
+        total_read = 0;
+        total_written = 0;
 
-			printk(KERN_INFO "cryptomod: Cleanup completed (buffer zeroed).\n");
-			return 0;
-
-        case CM_IOC_CNT_RST:
+        pr_info("cryptomod: Cleanup complete (zeroed buffers).\n");
+		mutex_unlock(&glob_lock);
+        return 0;
+    }
+    case CM_IOC_CNT_RST:{
             // Reset counters and byte frequency tracking
             total_read = 0;
             total_written = 0;
             memset(byte_freq, 0, sizeof(byte_freq));
 
             printk(KERN_INFO "cryptomod: Counters reset.\n");
+			mutex_unlock(&glob_lock);
             return 0;
-
-        default:
-            return -EINVAL;  // Invalid ioctl command
-    }
+	}
+    default:{
+		mutex_unlock(&glob_lock);
+        return -EINVAL;  // Invalid ioctl command
+	}
 }
-
+}
 static const struct file_operations cryptomod_dev_fops = {
 	.owner = THIS_MODULE,
 	.open = cryptomod_dev_open,
@@ -476,7 +462,9 @@ static const struct file_operations cryptomod_dev_fops = {
 };
 
 static int cryptomod_proc_read(struct seq_file *m, void *v) {
+	//struct cryptomod_priv *priv = m->private;
 	int i, j;
+	//if (!priv) return -EINVAL;
 	seq_printf(m, "%lu %lu\n", total_read, total_written);
 
 	// Print 16x16 Byte Frequency Matrix
