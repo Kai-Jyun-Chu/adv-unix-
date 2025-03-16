@@ -45,7 +45,7 @@ static unsigned long total_read;
 static unsigned long total_written;
 static unsigned long byte_freq[256];
 
-static size_t cap = 4096;
+static size_t cap = 26000;
 
 
 int AES(char *buffer, size_t* buffer_size,  struct CryptoSetup *crypto_config, bool finalized){
@@ -118,7 +118,7 @@ int AES(char *buffer, size_t* buffer_size,  struct CryptoSetup *crypto_config, b
 		err = crypto_wait_req(crypto_skcipher_decrypt(req), &wait);
 		if (err) {
 			printk(KERN_ERR "cryptomod: AES decryption failed: %d\n", err);
-			return -EINVAL;
+			//return -EINVAL;
 			goto out_free_req;
 		}
 		//printk(KERN_INFO "cryptomod: Successfully decrypted %zu bytes.\n", *buffer_size);
@@ -156,13 +156,9 @@ int AES(char *buffer, size_t* buffer_size,  struct CryptoSetup *crypto_config, b
 static int cryptomod_dev_open(struct inode *i, struct file *f) {
 	//printk(KERN_INFO "cryptomod: device opened.\n");
 	struct cryptomod_priv *priv;
-
     priv = kzalloc(sizeof(*priv), GFP_KERNEL);
     if (!priv)
         return -ENOMEM;
-
-    /* Initialize mutex for this instance */
-    mutex_init(&glob_lock);
 
     /* Optionally, set up any defaults here */
     priv->setup_done = false;
@@ -254,6 +250,13 @@ static ssize_t cryptomod_dev_write(struct file *f, const char __user *buf, size_
 {
 	struct cryptomod_priv *priv = f->private_data;
 	mutex_lock(&glob_lock);
+	if(!priv->setup_done){
+		mutex_unlock(&glob_lock);
+		return -EINVAL;
+	}
+
+
+
     if(priv->finalized){
 		mutex_unlock(&glob_lock);
 		return -EINVAL;
@@ -401,20 +404,25 @@ static long cryptomod_dev_ioctl(struct file *f, unsigned int cmd, unsigned long 
 	
 		}else{////////////DEC
 			printk(KERN_INFO "Finalize Dec Check, b_out: %zu, buf:%zu.\n",priv->out_size, priv->buffer_size);
+			/*if(priv->buffer_size%16!=0){
+				mutex_unlock(&glob_lock);
+				return -EINVAL;
+			}*/
 			err = AES(priv->buffer, &priv->buffer_size, &priv->crypto_config, true);
-			if(err){
+			/*if(err){
 				printk(KERN_INFO "==============There is an error.================\n");
 				//err = -EINVAL;
 				mutex_unlock(&glob_lock);
 				return -EINVAL;
-			}
+			}*/
 			memcpy(priv->buffer_o + priv->out_size, priv->buffer, priv->buffer_size);
 			priv->out_size+=priv->buffer_size;
 			
 			priv->buffer_size = 0;   
 		}
-		//AES
 		mutex_unlock(&glob_lock);
+		
+		pr_info("ERR = %d\n",err);
 		return err;
 	}
     case CM_IOC_CLEANUP: {
